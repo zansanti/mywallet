@@ -1,4 +1,4 @@
-import db from '../config/db.config.js';
+import { getDB } from '../config/db.config.js';
 import { ObjectId } from 'mongodb';
 
 export async function createTransaction(req, res) {
@@ -6,17 +6,27 @@ export async function createTransaction(req, res) {
     const { userId } = res.locals;
     
     try {
-        await db.collection('transactions').insertOne({
-            userId,
-            value,
+        const db = getDB();
+        const transactionsCollection = db.collection('transactions');
+        
+        // Validação adicional do tipo
+        if (!['deposit', 'withdraw'].includes(type)) {
+            return res.status(422).json({ error: 'Invalid transaction type' });
+        }
+
+        await transactionsCollection.insertOne({
+            userId: new ObjectId(userId), // Garante que o userId está no formato correto
+            value: parseFloat(value), // Garante que é float
             description,
             type,
-            date: new Date()
+            date: new Date(),
+            updatedAt: new Date() // Adiciona timestamp de criação
         });
         
-        res.sendStatus(201);
+        return res.status(201).json({ message: 'Transaction created successfully' });
     } catch (error) {
-        res.status(500).send(error.message);
+        console.error('CreateTransaction Error:', error);
+        return res.status(500).json({ error: 'Internal server error' });
     }
 }
 
@@ -24,19 +34,35 @@ export async function getTransactions(req, res) {
     const { userId } = res.locals;
     const page = parseInt(req.query.page) || 1;
     
-    if (page < 1) return res.status(400).send('Page must be a positive number');
+    if (page < 1) {
+        return res.status(400).json({ error: 'Page must be a positive number' });
+    }
     
     try {
-        const transactions = await db.collection('transactions')
-            .find({ userId })
+        const db = getDB();
+        const transactionsCollection = db.collection('transactions');
+        
+        const transactions = await transactionsCollection
+            .find({ userId: new ObjectId(userId) })
             .sort({ date: -1 })
             .skip((page - 1) * 10)
             .limit(10)
             .toArray();
             
-        res.send(transactions);
+        // Adiciona contagem total para paginação no front
+        const totalCount = await transactionsCollection.countDocuments({ userId: new ObjectId(userId) });
+        
+        return res.json({
+            transactions,
+            pagination: {
+                currentPage: page,
+                totalPages: Math.ceil(totalCount / 10),
+                totalTransactions: totalCount
+            }
+        });
     } catch (error) {
-        res.status(500).send(error.message);
+        console.error('GetTransactions Error:', error);
+        return res.status(500).json({ error: 'Internal server error' });
     }
 }
 
@@ -46,19 +72,35 @@ export async function updateTransaction(req, res) {
     const { value, description, type } = req.body;
     
     try {
-        // Check if transaction belongs to user
-        const transaction = await db.collection('transactions').findOne({ _id: new ObjectId(id) });
-        if (!transaction) return res.status(404).send('Transaction not found');
-        if (transaction.userId !== userId) return res.status(401).send('Unauthorized');
+        const db = getDB();
+        const transactionsCollection = db.collection('transactions');
         
-        await db.collection('transactions').updateOne(
+        // Verifica se a transação existe e pertence ao usuário
+        const transaction = await transactionsCollection.findOne({ 
+            _id: new ObjectId(id),
+            userId: new ObjectId(userId)
+        });
+        
+        if (!transaction) {
+            return res.status(404).json({ error: 'Transaction not found or unauthorized' });
+        }
+        
+        await transactionsCollection.updateOne(
             { _id: new ObjectId(id) },
-            { $set: { value, description, type } }
+            { 
+                $set: { 
+                    value: parseFloat(value),
+                    description,
+                    type,
+                    updatedAt: new Date() // Atualiza o timestamp
+                } 
+            }
         );
         
-        res.sendStatus(204);
+        return res.sendStatus(204);
     } catch (error) {
-        res.status(500).send(error.message);
+        console.error('UpdateTransaction Error:', error);
+        return res.status(500).json({ error: 'Internal server error' });
     }
 }
 
@@ -67,15 +109,22 @@ export async function deleteTransaction(req, res) {
     const { userId } = res.locals;
     
     try {
-        // Check if transaction belongs to user
-        const transaction = await db.collection('transactions').findOne({ _id: new ObjectId(id) });
-        if (!transaction) return res.status(404).send('Transaction not found');
-        if (transaction.userId !== userId) return res.status(401).send('Unauthorized');
+        const db = getDB();
+        const transactionsCollection = db.collection('transactions');
         
-        await db.collection('transactions').deleteOne({ _id: new ObjectId(id) });
+        // Verifica existência e permissão numa única query
+        const deleteResult = await transactionsCollection.deleteOne({ 
+            _id: new ObjectId(id),
+            userId: new ObjectId(userId)
+        });
         
-        res.sendStatus(204);
+        if (deleteResult.deletedCount === 0) {
+            return res.status(404).json({ error: 'Transaction not found or unauthorized' });
+        }
+        
+        return res.sendStatus(204);
     } catch (error) {
-        res.status(500).send(error.message);
+        console.error('DeleteTransaction Error:', error);
+        return res.status(500).json({ error: 'Internal server error' });
     }
 }
